@@ -1,5 +1,6 @@
 import dateutil.parser
 import json
+import os
 import subprocess as sp
 
 from sqlalchemy import inspect as sqlalchemy_inspect
@@ -16,28 +17,47 @@ class DRM_K8S_Jobs(DRM):  # noqa
     """
 
     name = 'k8s-jobs'
-    always_cleanup = True
     required_drm_options = {'image'}
     optional_drm_options = {'file', 'time', 'name', 'container_name', 'cpu', 'memory', 'disk',
                             'cpu-limit', 'memory-limit', 'disk-limit', 'time', 'persistent-disk-name',
-                            'volume-name', 'mount-path', 'preemptible'}
+                            'volume-name', 'mount-path', 'preemptible', 'labels', 'retry-limit', 'partition'}
+
     drm_options_to_task_properties = {
         'memory': Task.mem_req,
         'cpu': Task.cpu_req,
         'time': Task.time_req,
+        'partition': Task.queue,
+        'retry-limit': lambda task: task.max_attempts - 1,
     }
 
     def _merge_task_properties_and_drm_options(self, task, drm_options):
         drm_options = dict(drm_options)
         task_state = sqlalchemy_inspect(task)
 
-        for drm_option_name, task_property in self.drm_options_to_task_properties.iteritems():
-            task_value = task_state.attrs[task_property.key].value
+        for drm_option_name, task_mapping in self.drm_options_to_task_properties.iteritems():
+            if callable(task_mapping):
+                task_value = task_mapping(task)
+            else:
+                task_value = task_state.attrs[task_mapping.key].value
 
             if task_value:
-                drm_options[drm_option_name] = task_value
+                # Translate cosmos memory requirements (in Kilobytes) to k8s-jobs memory (in bytes)
+                if drm_option_name == "memory":
+                    drm_options[drm_option_name] = str(task_value) + "K"
+                else:
+                    drm_options[drm_option_name] = task_value
 
         return drm_options
+
+    def _get_drm_option_value(self, drm_option_value):
+        if isinstance(drm_option_value, str):
+            return drm_option_value
+        elif isinstance(drm_option_value, list):
+            return ' '.join([str(value) for value in drm_option_value])
+        elif isinstance(drm_option_value, dict):
+            return ' '.join(['{key}={value}'.format(key=key, value=value) for key, value in drm_option_value.items()])
+        else:
+            return str(drm_option_value)
 
     def submit_job(self, task):
         native_spec = task.drm_native_specification if task.drm_native_specification else ''
@@ -48,7 +68,7 @@ class DRM_K8S_Jobs(DRM):  # noqa
         kbatch_options = [
             '--{kbatch_option_name} {kbatch_option_value}'.format(
                 kbatch_option_name=kbatch_option_name,
-                kbatch_option_value=drm_options[kbatch_option_name],
+                kbatch_option_value=self._get_drm_option_value(drm_options[kbatch_option_name]),
             ) for kbatch_option_name in drm_option_names if kbatch_option_name in drm_options
         ]
         kbatch_option_str = ' '.join(kbatch_options)
@@ -120,16 +140,23 @@ class DRM_K8S_Jobs(DRM):  # noqa
         task_infos = {task_info['metadata']['labels']['job-name']: task_info for task_info in task_infos}
         return task_infos
 
-    def kill(self, task):
-        # Transfer the logs from our job into an output file before killing it
+    def populate_logs(self, task):
+        # Transfer the logs from our job into an output file
         job_id = task.drm_jobID
+
         stream_logs_cmd = 'klogs {job_id}'.format(job_id=job_id)
 
-        sp.Popen(stream_logs_cmd,
+        log_dir = os.path.dirname(task.output_stdout_path)
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+
+        sp.call(stream_logs_cmd,
                  stdout=open(task.output_stdout_path, 'w'),
                  stderr=open(task.output_stderr_path, 'w'),
                  shell=True)
 
+    def kill(self, task):
+        job_id = task.drm_jobID
         kill_cmd = 'kcancel {job_id}'.format(job_id=job_id)
 
         kill_proc = sp.Popen(kill_cmd, shell=True, stdout=sp.PIPE, stderr=sp.PIPE)
@@ -138,3 +165,7 @@ class DRM_K8S_Jobs(DRM):  # noqa
 
         if err:
             raise RuntimeError(err)
+    
+    def cleanup_task(self, task):
+        if task.drm_jobID and task.status != TaskStatus.killed:
+            self.kill(task)

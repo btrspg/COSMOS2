@@ -30,9 +30,8 @@ install_requires = [
     'networkx>=2.0',
     "six",
     "drmaa",
-    'more_itertools',
+    'more-itertools',
     "decorator",
-    "retry",
     "python-dateutil",
 ]
 package_data = {'cosmos': list(find_all('cosmos/', '.py|.pyc$', inverse=True, remove_prefix=True))}
@@ -45,11 +44,11 @@ if sys.version_info < (3, 6):
 setup(
     name="cosmos-wfm",
     version=__version__,
-    scripts=['bin/cosmos'],
+    scripts=['bin/cosmos','bin/run_pyfunc'],
     description="Workflow Management System",
     long_description='Cosmos is a library for writing analysis pipelines, and is particularly suited pipelines which analyze next generation sequencing genomic'
-                     'data. See https://github.com/LPM-HMS/COSMOS2 for details.',
-    url="https://cosmos.hms.harvard.edu/",
+                     'data. See https://github.com/Mizzou-CBMI/COSMOS2 for details.',
+    url="https://mizzou-cbmi.github.io/",
     author="Erik Gafni",
     author_email="egafni@gmail.com",
     maintainer="Erik Gafni",
